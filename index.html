@@ -1,0 +1,647 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Auto-regressive vocoders are typically less efficient at inference due to their serial nature, making it
+  difficult to fully utilize graphics processing units (GPUs). In this context, batched inference with upsampled
+  feature folding can be used to speed up vocoding. However, speech quality degradation caused by blending folded
+  waveform segments making it hard to be applied to production. To address this issue, we propose a novel blending
+  approach called heuristic dynamic blending (HDB), which effectively addresses the voice trembling and diplopia
+  issues of conventional static blending. We also propose a parallel algorithm of HDB running on GPUs, which
+  significantly reduces the additional time overhead introduced by the naive HDB algorithm. Experimental results
+  demonstrate that using a multi-band WaveRNN with HDB can effectively improve parallelism for real-time GPU
+  vocoding while maintaining high speech quality comparable to non-folding inference.">
+  <title>Improving WaveRNN with Heuristic Dynamic Blending for Fast and High-Quality GPU Vocoding</title>
+
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.2.2/css/bootstrap.min.css"
+    integrity="sha512-CpIKUSyh9QX2+zSdfGP+eWLx23C8Dj9/XmHjZY2uDtfkdLGo0uY12jgcnkX9vXOgYajEKb/jiw67EYm+kBf+6g=="
+    crossorigin="anonymous" referrerpolicy="no-referrer" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.5.0/Chart.min.js"></script>
+
+  <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+  <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+
+  <!-- Favicons -->
+  <meta name="theme-color" content="#712cf9">
+
+
+  <style>
+    .bd-placeholder-img {
+      font-size: 1.125rem;
+      text-anchor: middle;
+      -webkit-user-select: none;
+      -moz-user-select: none;
+      user-select: none;
+    }
+
+    @media (min-width: 768px) {
+      .bd-placeholder-img-lg {
+        font-size: 3.5rem;
+      }
+    }
+
+    .b-example-divider {
+      height: 3rem;
+      background-color: rgba(0, 0, 0, .1);
+      border: solid rgba(0, 0, 0, .15);
+      border-width: 1px 0;
+      box-shadow: inset 0 .5em 1.5em rgba(0, 0, 0, .1), inset 0 .125em .5em rgba(0, 0, 0, .15);
+    }
+
+    .b-example-vr {
+      flex-shrink: 0;
+      width: 1.5rem;
+      height: 100vh;
+    }
+
+    .bi {
+      vertical-align: -.125em;
+      fill: currentColor;
+    }
+
+    .nav-scroller {
+      position: relative;
+      z-index: 2;
+      height: 2.75rem;
+      overflow-y: hidden;
+    }
+
+    .nav-scroller .nav {
+      display: flex;
+      flex-wrap: nowrap;
+      padding-bottom: 1rem;
+      margin-top: -1px;
+      overflow-x: auto;
+      text-align: center;
+      white-space: nowrap;
+      -webkit-overflow-scrolling: touch;
+    }
+  </style>
+
+
+  <!-- Custom styles for this template -->
+  <link href="https://getbootstrap.com/docs/5.2/examples/grid/grid.css" rel="stylesheet">
+</head>
+
+<body class="py-4">
+
+  <main>
+    <div class="container">
+
+      <h1 class="mb-3">Improving WaveRNN with Heuristic Dynamic Blending for Fast and High-Quality GPU
+        Vocoding</h1>
+
+      <div class="row">
+        <div class="col-6">
+          <!-- <p class="lead"><strong>Paper:</strong> <a href="https://arxiv.org/abs/2211.13939"
+              target="_blank">https://arxiv.org/abs/2211.13939</a></p> -->
+        </div>
+      </div>
+
+      <p>
+        Auto-regressive vocoders are typically less efficient at inference due to their serial nature, making it
+        difficult to fully utilize graphics processing units (GPUs). In this context, batched inference with upsampled
+        feature folding can be used to speed up vocoding. However, speech quality degradation caused by blending folded
+        waveform segments making it hard to be applied to production. To address this issue, we propose a novel blending
+        approach called heuristic dynamic blending (HDB), which effectively addresses the voice trembling and diplopia
+        issues of conventional static blending. We also propose a parallel algorithm of HDB running on GPUs, which
+        significantly reduces the additional time overhead introduced by the naive HDB algorithm. Experimental results
+        demonstrate that using a multi-band WaveRNN with HDB can effectively improve parallelism for real-time GPU
+        vocoding while maintaining high speech quality comparable to non-folding inference.
+      </p>
+
+      <h2 class="mt-4 mb-3">Audio Samples</h2>
+      <p>Dataset: <a href="https://keithito.com/LJ-Speech-Dataset/" target="_blank">The LJ Speech Dataset - Keith
+          Ito</a></p>
+      <hr />
+      <p>
+        <strong>Non-Folding</strong>: Non-Folding inference.<br />
+        <strong>Folding wo Blending</strong>: Folding inference without blending. Crackling Noise.<br />
+        <strong>Folding w Static Blending</strong>: Folding inference with Static Blending. Voice Trembling and
+        Echo.<br />
+        <strong>Folding w HDB</strong>: Folding inference with the proposed Heuristic Dynamic Blending.<br />
+      </p>
+      <hr />
+
+      <h5 class="mb-2 mt-4">Audio Samples of \(\hat{SL}=100\), \(\hat{OL}=50\)</h5>
+
+      <div class="row mb-3 text-center">
+        <div class="col-sm-12">
+          <table class="table table-hover">
+            <thead>
+              <tr>
+                <th scope="col">Name</th>
+                <th scope="col">Ground Truth</th>
+                <th scope="col">Non-Folding</th>
+                <th scope="col">Folding wo Blending</th>
+                <th scope="col">Folding w Static Blending</th>
+                <th scope="col">Folding w HDB</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr data-toggle="tooltip" title="This exhibition lasts for some minutes, and then the congregation disperses,">
+                <th scope="row" class="align-middle">LJ009-0110</th>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/ground_truth/LJ009-0110.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/non_folding/LJ009-0110_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_wo_blend_100_50/LJ009-0110_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_static_100_50/LJ009-0110_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle table-active"><audio style="width:220px" controls>
+                    <source src="samples/folding_dynamic_100_50/LJ009-0110_synthesized.wav" type="audio/wav">
+                  </audio></td>
+              </tr>
+
+              <tr data-toggle="tooltip" title="extended at full length on an inclined platform">
+                <th scope="row" class="align-middle">LJ009-0207</th>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/ground_truth/LJ009-0207.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/non_folding/LJ009-0207_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_wo_blend_100_50/LJ009-0207_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_static_100_50/LJ009-0207_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle table-active"><audio style="width:220px" controls>
+                    <source src="samples/folding_dynamic_100_50/LJ009-0207_synthesized.wav" type="audio/wav">
+                  </audio></td>
+              </tr>
+
+              <tr data-toggle="tooltip" title="and died in a manner strongly contrasting with that of his fellows.">
+                <th scope="row" class="align-middle">LJ010-0138</th>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/ground_truth/LJ010-0138.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/non_folding/LJ010-0138_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_wo_blend_100_50/LJ010-0138_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_static_100_50/LJ010-0138_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle table-active"><audio style="width:220px" controls>
+                    <source src="samples/folding_dynamic_100_50/LJ010-0138_synthesized.wav" type="audio/wav">
+                  </audio></td>
+              </tr>
+
+              <tr data-toggle="tooltip" title="In his person he was neat and fastidious;">
+                <th scope="row" class="align-middle">LJ015-0159</th>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/ground_truth/LJ015-0159.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/non_folding/LJ015-0159_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_wo_blend_100_50/LJ015-0159_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_static_100_50/LJ015-0159_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle table-active"><audio style="width:220px" controls>
+                    <source src="samples/folding_dynamic_100_50/LJ015-0159_synthesized.wav" type="audio/wav">
+                  </audio></td>
+              </tr>
+
+              <tr data-toggle="tooltip" title="Lord Advocate, Mr. Charles Neate, Mr. William Ewart, and last, but not least, Mr. John Bright">
+                <th scope="row" class="align-middle">LJ016-0326</th>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/ground_truth/LJ016-0326.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/non_folding/LJ016-0326_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_wo_blend_100_50/LJ016-0326_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_static_100_50/LJ016-0326_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle table-active"><audio style="width:220px" controls>
+                    <source src="samples/folding_dynamic_100_50/LJ016-0326_synthesized.wav" type="audio/wav">
+                  </audio></td>
+              </tr>
+
+              <tr data-toggle="tooltip" title="The rifle in the building.">
+                <th scope="row" class="align-middle">LJ033-0003</th>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/ground_truth/LJ033-0003.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/non_folding/LJ033-0003_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_wo_blend_100_50/LJ033-0003_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_static_100_50/LJ033-0003_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle table-active"><audio style="width:220px" controls>
+                    <source src="samples/folding_dynamic_100_50/LJ033-0003_synthesized.wav" type="audio/wav">
+                  </audio></td>
+              </tr>
+
+              <tr data-toggle="tooltip" title="Considering the various probabilities which may have prevailed during the actual assassination,">
+                <th scope="row" class="align-middle">LJ039-0184</th>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/ground_truth/LJ039-0184.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/non_folding/LJ039-0184_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_wo_blend_100_50/LJ039-0184_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_static_100_50/LJ039-0184_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle table-active"><audio style="width:220px" controls>
+                    <source src="samples/folding_dynamic_100_50/LJ039-0184_synthesized.wav" type="audio/wav">
+                  </audio></td>
+              </tr>
+
+              <tr data-toggle="tooltip" title="with 50 percent of the people taking it who score less than 100.">
+                <th scope="row" class="align-middle">LJ043-0080</th>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/ground_truth/LJ043-0080.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/non_folding/LJ043-0080_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_wo_blend_100_50/LJ043-0080_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_static_100_50/LJ043-0080_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle table-active"><audio style="width:220px" controls>
+                    <source src="samples/folding_dynamic_100_50/LJ043-0080_synthesized.wav" type="audio/wav">
+                  </audio></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <h5 class="mb-2 mt-4">Audio Samples of \(\hat{SL}=500\), \(\hat{OL}=50\)</h5>
+
+      <div class="row mb-3 text-center">
+        <div class="col-sm-12">
+          <table class="table table-hover">
+            <thead>
+              <tr>
+                <th scope="col">Name</th>
+                <th scope="col">Ground Truth</th>
+                <th scope="col">Non-Folding</th>
+                <th scope="col">Folding wo Blending</th>
+                <th scope="col">Folding w Static Blending</th>
+                <th scope="col">Folding w HDB</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr data-toggle="tooltip" title="This exhibition lasts for some minutes, and then the congregation disperses,">
+                <th scope="row" class="align-middle">LJ009-0110</th>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/ground_truth/LJ009-0110.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/non_folding/LJ009-0110_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_wo_blend_500_50/LJ009-0110_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_static_500_50/LJ009-0110_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle table-active"><audio style="width:220px" controls>
+                    <source src="samples/folding_dynamic_500_50/LJ009-0110_synthesized.wav" type="audio/wav">
+                  </audio></td>
+              </tr>
+
+              <tr data-toggle="tooltip" title="extended at full length on an inclined platform">
+                <th scope="row" class="align-middle">LJ009-0207</th>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/ground_truth/LJ009-0207.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/non_folding/LJ009-0207_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_wo_blend_500_50/LJ009-0207_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_static_500_50/LJ009-0207_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle table-active"><audio style="width:220px" controls>
+                    <source src="samples/folding_dynamic_500_50/LJ009-0207_synthesized.wav" type="audio/wav">
+                  </audio></td>
+              </tr>
+
+              <tr data-toggle="tooltip" title="and died in a manner strongly contrasting with that of his fellows.">
+                <th scope="row" class="align-middle">LJ010-0138</th>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/ground_truth/LJ010-0138.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/non_folding/LJ010-0138_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_wo_blend_500_50/LJ010-0138_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_static_500_50/LJ010-0138_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle table-active"><audio style="width:220px" controls>
+                    <source src="samples/folding_dynamic_500_50/LJ010-0138_synthesized.wav" type="audio/wav">
+                  </audio></td>
+              </tr>
+
+              <tr data-toggle="tooltip" title="In his person he was neat and fastidious;">
+                <th scope="row" class="align-middle">LJ015-0159</th>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/ground_truth/LJ015-0159.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/non_folding/LJ015-0159_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_wo_blend_500_50/LJ015-0159_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_static_500_50/LJ015-0159_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle table-active"><audio style="width:220px" controls>
+                    <source src="samples/folding_dynamic_500_50/LJ015-0159_synthesized.wav" type="audio/wav">
+                  </audio></td>
+              </tr>
+
+              <tr data-toggle="tooltip" title="Lord Advocate, Mr. Charles Neate, Mr. William Ewart, and last, but not least, Mr. John Bright">
+                <th scope="row" class="align-middle">LJ016-0326</th>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/ground_truth/LJ016-0326.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/non_folding/LJ016-0326_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_wo_blend_500_50/LJ016-0326_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_static_500_50/LJ016-0326_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle table-active"><audio style="width:220px" controls>
+                    <source src="samples/folding_dynamic_500_50/LJ016-0326_synthesized.wav" type="audio/wav">
+                  </audio></td>
+              </tr>
+
+              <tr data-toggle="tooltip" title="The rifle in the building.">
+                <th scope="row" class="align-middle">LJ033-0003</th>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/ground_truth/LJ033-0003.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/non_folding/LJ033-0003_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_wo_blend_500_50/LJ033-0003_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_static_500_50/LJ033-0003_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle table-active"><audio style="width:220px" controls>
+                    <source src="samples/folding_dynamic_500_50/LJ033-0003_synthesized.wav" type="audio/wav">
+                  </audio></td>
+              </tr>
+
+              <tr data-toggle="tooltip" title="Considering the various probabilities which may have prevailed during the actual assassination,">
+                <th scope="row" class="align-middle">LJ039-0184</th>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/ground_truth/LJ039-0184.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/non_folding/LJ039-0184_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_wo_blend_500_50/LJ039-0184_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_static_500_50/LJ039-0184_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle table-active"><audio style="width:220px" controls>
+                    <source src="samples/folding_dynamic_500_50/LJ039-0184_synthesized.wav" type="audio/wav">
+                  </audio></td>
+              </tr>
+
+              <tr data-toggle="tooltip" title="with 50 percent of the people taking it who score less than 100.">
+                <th scope="row" class="align-middle">LJ043-0080</th>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/ground_truth/LJ043-0080.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/non_folding/LJ043-0080_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_wo_blend_500_50/LJ043-0080_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_static_500_50/LJ043-0080_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle table-active"><audio style="width:220px" controls>
+                    <source src="samples/folding_dynamic_500_50/LJ043-0080_synthesized.wav" type="audio/wav">
+                  </audio></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <h5 class="mb-2 mt-4">Audio Samples of \(\hat{SL}=1000\), \(\hat{OL}=50\)</h5>
+
+      <div class="row mb-3 text-center">
+        <div class="col-sm-12">
+          <table class="table table-hover">
+            <thead>
+              <tr>
+                <th scope="col">Name</th>
+                <th scope="col">Ground Truth</th>
+                <th scope="col">Non-Folding</th>
+                <th scope="col">Folding wo Blending</th>
+                <th scope="col">Folding w Static Blending</th>
+                <th scope="col">Folding w HDB</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr data-toggle="tooltip" title="This exhibition lasts for some minutes, and then the congregation disperses,">
+                <th scope="row" class="align-middle">LJ009-0110</th>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/ground_truth/LJ009-0110.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/non_folding/LJ009-0110_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_wo_blend_1000_50/LJ009-0110_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_static_1000_50/LJ009-0110_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle table-active"><audio style="width:220px" controls>
+                    <source src="samples/folding_dynamic_1000_50/LJ009-0110_synthesized.wav" type="audio/wav">
+                  </audio></td>
+              </tr>
+
+              <tr data-toggle="tooltip" title="extended at full length on an inclined platform">
+                <th scope="row" class="align-middle">LJ009-0207</th>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/ground_truth/LJ009-0207.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/non_folding/LJ009-0207_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_wo_blend_1000_50/LJ009-0207_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_static_1000_50/LJ009-0207_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle table-active"><audio style="width:220px" controls>
+                    <source src="samples/folding_dynamic_1000_50/LJ009-0207_synthesized.wav" type="audio/wav">
+                  </audio></td>
+              </tr>
+
+              <tr data-toggle="tooltip" title="and died in a manner strongly contrasting with that of his fellows.">
+                <th scope="row" class="align-middle">LJ010-0138</th>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/ground_truth/LJ010-0138.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/non_folding/LJ010-0138_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_wo_blend_1000_50/LJ010-0138_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_static_1000_50/LJ010-0138_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle table-active"><audio style="width:220px" controls>
+                    <source src="samples/folding_dynamic_1000_50/LJ010-0138_synthesized.wav" type="audio/wav">
+                  </audio></td>
+              </tr>
+
+              <tr data-toggle="tooltip" title="In his person he was neat and fastidious;">
+                <th scope="row" class="align-middle">LJ015-0159</th>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/ground_truth/LJ015-0159.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/non_folding/LJ015-0159_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_wo_blend_1000_50/LJ015-0159_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_static_1000_50/LJ015-0159_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle table-active"><audio style="width:220px" controls>
+                    <source src="samples/folding_dynamic_1000_50/LJ015-0159_synthesized.wav" type="audio/wav">
+                  </audio></td>
+              </tr>
+
+              <tr data-toggle="tooltip" title="Lord Advocate, Mr. Charles Neate, Mr. William Ewart, and last, but not least, Mr. John Bright">
+                <th scope="row" class="align-middle">LJ016-0326</th>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/ground_truth/LJ016-0326.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/non_folding/LJ016-0326_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_wo_blend_1000_50/LJ016-0326_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_static_1000_50/LJ016-0326_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle table-active"><audio style="width:220px" controls>
+                    <source src="samples/folding_dynamic_1000_50/LJ016-0326_synthesized.wav" type="audio/wav">
+                  </audio></td>
+              </tr>
+
+              <tr data-toggle="tooltip" title="The rifle in the building.">
+                <th scope="row" class="align-middle">LJ033-0003</th>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/ground_truth/LJ033-0003.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/non_folding/LJ033-0003_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_wo_blend_1000_50/LJ033-0003_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_static_1000_50/LJ033-0003_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle table-active"><audio style="width:220px" controls>
+                    <source src="samples/folding_dynamic_1000_50/LJ033-0003_synthesized.wav" type="audio/wav">
+                  </audio></td>
+              </tr>
+
+              <tr data-toggle="tooltip" title="Considering the various probabilities which may have prevailed during the actual assassination,">
+                <th scope="row" class="align-middle">LJ039-0184</th>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/ground_truth/LJ039-0184.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/non_folding/LJ039-0184_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_wo_blend_1000_50/LJ039-0184_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_static_1000_50/LJ039-0184_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle table-active"><audio style="width:220px" controls>
+                    <source src="samples/folding_dynamic_1000_50/LJ039-0184_synthesized.wav" type="audio/wav">
+                  </audio></td>
+              </tr>
+
+              <tr data-toggle="tooltip" title="with 50 percent of the people taking it who score less than 100.">
+                <th scope="row" class="align-middle">LJ043-0080</th>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/ground_truth/LJ043-0080.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/non_folding/LJ043-0080_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_wo_blend_1000_50/LJ043-0080_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle"><audio style="width:220px" controls>
+                    <source src="samples/folding_static_1000_50/LJ043-0080_synthesized.wav" type="audio/wav">
+                  </audio></td>
+                <td class="align-middle table-active"><audio style="width:220px" controls>
+                    <source src="samples/folding_dynamic_1000_50/LJ043-0080_synthesized.wav" type="audio/wav">
+                  </audio></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+  </main>
+
+</body>
+
+</html>
